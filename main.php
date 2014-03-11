@@ -16,12 +16,13 @@ include(YOCTOPUCE_LIB_PATH . "yocto_display.php");
 include(YOCTOPUCE_LIB_PATH . "yocto_relay.php");
 
 
-
-$display = NULL;
-$conn = mysql_connect(FRIDAYDB_SERVER, FRIDAYDB_USER, FRIDAYDB_PASSWORD);
-$res = mysql_select_db(FRIDAYDB_NAME);
-
-
+/**
+ * Output the a error message and stop the script.
+ * the message is diplayed on the Yocto-Display if it is connected
+ * and printed on the socket.
+ *
+ * @param $msg : the error message
+ */
 function Error($msg)
 {
     global $display;
@@ -38,53 +39,79 @@ function Error($msg)
 }
 
 
-
+/**
+ * switch on or off the connected humidifier. Frist we cut the power for 500ms to
+ * reset the humidifier to his default state (OFF). Then if we want to sitch it on
+ * we need to simulate the push of the power button.
+ * @param bool $on
+ */
 function setHumidifierState($on=False)
 {
     /** @var $humPower YRelay */
     /** @var $humSwitch YRelay */
     global $humPower, $humSwitch;
-    // first we cut the power of the humidifier
-    // to reset his state to off
-    $humPower->pulse(YRelay::STATE_B,500);
+    $humPower->pulse(500);
     if ($on) {
-        // if we want to set off the humidifier
-        // we emmit a pulse on the power switch
-        $humSwitch->pulse(YRelay::STATE_B,100);
+        $humSwitch->delayedPulse(500,100);
     }
 
 }
 
-
-if (YAPI::RegisterHub("callback", $errmsg) != YAPI_SUCCESS)
+// setup Yoctopuce API to work in HTTP Callback
+ if (YAPI::RegisterHub("callback", $errmsg) != YAPI_SUCCESS)
     Error($errmsg);
 
 /** @var $tempSensor YTemperature */
-$tempSensor = YTemperature::FirstTemperature();
 /** @var $humSenor YHumidity */
-$humSenor = YHumidity::FirstHumidity();
 /** @var $pressSensor YPressure */
-$pressSensor = YPressure::FirstPressure();
 /** @var $display YDisplay */
-$display = YDisplay::FirstDisplay();
 /** @var $humPower YRelay */
-$humPower=YRelay::FindRelay("hum_power");
 /** @var $humSwitch YRelay */
+$tempSensor = YTemperature::FirstTemperature();
+$humSenor = YHumidity::FirstHumidity();
+$pressSensor = YPressure::FirstPressure();
+$display = YDisplay::FirstDisplay();
+$humPower=YRelay::FindRelay("hum_power");
 $humSwitch=YRelay::FindRelay("hum_switch");
 
-
+// ensure that the humidifier is detected
 if (!$humPower->isOnline() || !$humSwitch->isOnline()) {
     Error("Humidifier is not connected or badly configured");
 }
 
-$humidity = $humSenor->get_currentValue();
-if ($humidity < MIN_HUMIDITY) {
-    setHumidifierState(True);
+// setup database connection
+$DbConnection = mysql_connect(FRIDAYDB_SERVER, FRIDAYDB_USER, FRIDAYDB_PASSWORD);
+if (!$DbConnection) {
+    Error("Unable to connect to Database");
+}
+if (!mysql_select_db(FRIDAYDB_NAME,$DbConnection)) {
+    Error("Unable to select db ".FRIDAYDB_NAME);
+}
+
+
+
+
+
+$currentTemp = (int)$tempSensor->get_currentValue();
+$currentHum  = (int)$humSenor->get_currentValue();
+$currentPres = (int)$pressSensor->get_currentValue();
+
+if ($currentHum < MIN_HUMIDITY) {
     //switch On Humidifier
-} else if ($humidity> MAX_HUMIDITY) {
+    $humstate = True;
+    setHumidifierState(True);
+} else if ($currentHum> MAX_HUMIDITY) {
+    $humstate = False;
     //switch Off Humidifier
     setHumidifierState(false);
 }
+
+$timestamp = time();
+$res = mysql_query("insert into states (timestamp,temperature,humidity,pressure,humidifier) values ($timestamp,$currentTemp,$currentHum,$currentPres,$humstate)",$DbConnection);
+if (!$res) {
+    Error(mysql_error());
+}
+
 
 
 if ($display->isOnline()) {
@@ -96,109 +123,77 @@ if ($display->isOnline()) {
     $timestamp = time();
     $lastTemp = 0;
     $lastHum = 0;
-    $lastPress = 0;
 
-    // fetch data from dtatabse, group  by 15 min clusters
-    $result = mysql_query("select * from humidity where timestamp>" . ($timestamp - 86400) . " order by timestamp");
+    // fetch data from database, group  by 15 min clusters
+    $result = mysql_query("select * from states where timestamp>" . ($timestamp - 86400) . " order by timestamp",$DbConnection);
     if (!$result)
         Error(mysql_error());
-
     while ($row = mysql_fetch_array($result)) {
-        $lastTemp = $row["temperature"];
-        $lastHum = $row["humidity"];
-        $lastPress = $row["pressure"];
-        $lasTimeStamp = $row["timestamp"];
-
-
+        /** @var $index int */
         $index = (int)($timestamp - $row["timestamp"]) / 300;
-        $history[$index]["temp"] += $lastTemp;
-        $history[$index]["hum"] += $lastHum;
-        $history[$index]["press"] += $lastPress;
+        $history[$index]["hum"] += $row["humidity"];
         $history[$index]["count"] += 1;
     }
-
     // compute average
-    $tmin = 999;
-    $tmax = -999;
-
+    $hmin = 999;
+    $hmax = -999;
     for ($i = 0; $i < sizeof($history); $i++) {
         if ($history[$i]["count"] > 0) {
-            $history[$i]["temp"] = $history[$i]["temp"] / $history[$i]["count"];
             $history[$i]["hum"] = $history[$i]["hum"] / $history[$i]["count"];
-            $history[$i]["press"] = $history[$i]["press"] / $history[$i]["count"];
-            if ($history[$i]["temp"] > $tmax)
-                $tmax = $history[$i]["temp"];
-            if ($history[$i]["temp"] < $tmin)
-                $tmin = $history[$i]["temp"];
+            if ($history[$i]["hum"] > $hmax)
+                $hmax = $history[$i]["hum"];
+            if ($history[$i]["hum"] < $hmin)
+                $hmin = $history[$i]["hum"];
         }
     }
 
+    // clear potential error message from previous run
+    /** @var $l0 YDisplayLayer */
+    $l0 = $display->get_displayLayer(0);
+    $l0->clearConsole();
+
     $width = $display->get_displayWidth();
     $height = $display->get_displayHeight();
-
-    Printf("Display size = $width*$height \n");
-
+    print("width=$width height=$height");
 
     /** @var $layer4 YDisplayLayer */
     $layer4 = $display->get_displayLayer(4);
     $layer4->reset();
     $layer4->hide();
-
-
-    // altitude correction
-    $Z = 500;
-    if (isset($_GET['alt']))
-        $Z = intval($_GET['alt']);
-    printf("Altitude=$Z m\n");
-
-
-    $altPress = round($lastPress + 1013.25 * (1 - pow(1 - (0.0065 * $Z / 288.15), 5.255)));
-
-
     $layer4->selectFont('Small.yfm');
-    $layer4->drawText(0, 0, Y_ALIGN_TOP_LEFT, 'P:' . $altPress);
-    $layer4->drawText(0, $height - 1, Y_ALIGN_BOTTOM_LEFT, $lastHum . '%');
+    $layer4->drawText(0, $height - 1, Y_ALIGN_BOTTOM_LEFT,sprintf("T: %d°", $currentTemp));
     if ($height > 32)
         $layer4->drawText($width / 2, $height - 1, Y_ALIGN_BOTTOM_CENTER, date('H:i'));
 
-    $middle = (($tmax + $tmin) / 2);
-
+    $middle = (($hmax + $hmin) / 2);
     $middleScale = 5 * round($middle / 5);
-    print("max=$tmax min=$tmin middle= $middleScale");
-    for ($i = $middleScale - 10; $i <= $middleScale + 10; $i += 5) {
+    print("max=$hmax min=$hmin middle= $middleScale");
+    for ($i = $middleScale - 15; $i <= $middleScale + 15; $i += 5) {
         $layer4->drawText($width - 1, round(($height / 2) - 2 * ($i - $middle)), Y_ALIGN_CENTER_RIGHT, $i);
-        $layer4->moveTo($width - 13, round(($height / 2) - 2 * ($i - $middle)));
-        $layer4->lineTo($width - 12, round(($height / 2) - 2 * ($i - $middle)));
+        $layer4->moveTo($width - 14, round(($height / 2) - 2 * ($i - $middle)));
+        $layer4->lineTo($width - 13, round(($height / 2) - 2 * ($i - $middle)));
     }
 
     $i = 0;
     if ($history[$i]["count"] > 0)
-        $layer4->moveTo($width - 15, round(($height / 2) - ($history[$i]["temp"] - $middle) * 2));
+        $layer4->moveTo($width - 15, round(($height / 2) - ($history[$i]["hum"] - $middle) * 2));
 
     for ($i = 0; $i < sizeof($history); $i++)
         if ($history[$i]["count"] > 0)
-            $layer4->lineTo($width - $i - 15, round($height / 2 - ($history[$i]["temp"] - $middle) * 2));
+            $layer4->lineTo($width - $i - 15, round($height / 2 - ($history[$i]["hum"] - $middle) * 2));
 
-    if ((time() - $lasTimeStamp) > 900) {
-        $lastTemp = sprintf("No data since %d min", (time() - $lasTimeStamp) / 60);
-    } else {
-        $lastTemp = sprintf("%2.1f", $lastTemp);
-        $layer4->selectFont('Medium.yfm');
-    }
-
-
+    $lastHumText = sprintf("%d %%", $currentHum);
+    $layer4->selectFont('Medium.yfm');
+    // draw background
     $layer4->selectColorPen(0);
-    $layer4->drawText($width / 2 - 1, $height / 2, Y_ALIGN_CENTER, $lastTemp);
-    $layer4->drawText($width / 2 + 1, $height / 2, Y_ALIGN_CENTER, $lastTemp);
-    $layer4->drawText($width / 2, $height / 2 + 1, Y_ALIGN_CENTER, $lastTemp);
-    $layer4->drawText($width / 2, $height / 2 - 1, Y_ALIGN_CENTER, $lastTemp);
+    $layer4->drawText($width / 2 - 1, $height / 2, Y_ALIGN_CENTER, $lastHumText);
+    $layer4->drawText($width / 2 + 1, $height / 2, Y_ALIGN_CENTER, $lastHumText);
+    $layer4->drawText($width / 2, $height / 2 + 1, Y_ALIGN_CENTER, $lastHumText);
+    $layer4->drawText($width / 2, $height / 2 - 1, Y_ALIGN_CENTER, $lastHumText);
+    // draw lastHumText
     $layer4->selectColorPen(0xffff);
-    $layer4->drawText($width / 2, $height / 2, Y_ALIGN_CENTER, $lastTemp);
-
-
+    $layer4->drawText($width / 2, $height / 2, Y_ALIGN_CENTER, $lastHumText);
     $display->swapLayerContent(3, 4);
-} else {
-    Printf("WARNING:  No display function with MeteoDisplay logical name\n");
 }
 
 ?>
