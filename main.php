@@ -4,7 +4,7 @@ define('FRIDAYDB_SERVER', 'localhost');
 define('FRIDAYDB_NAME', 'fridaydb1');
 define('FRIDAYDB_USER', 'root');
 define('FRIDAYDB_PASSWORD', '');
-define('YOCTOPUCE_LIB_PATH', '');
+define('YOCTOPUCE_LIB_PATH', 'C:/data/yoctoprod/yoctolib/v1.0/Public/php/Sources/');
 define('MIN_HUMIDITY', 45);
 define('MAX_HUMIDITY', 55);
 
@@ -58,7 +58,7 @@ function setHumidifierState($on=False)
 }
 
 // setup Yoctopuce API to work in HTTP Callback
- if (YAPI::RegisterHub("callback", $errmsg) != YAPI_SUCCESS)
+ if (YAPI::RegisterHub("192.168.1.85", $errmsg) != YAPI_SUCCESS)
     Error($errmsg);
 
 /** @var $tempSensor YTemperature */
@@ -154,7 +154,12 @@ if ($display->isOnline()) {
 
     $width = $display->get_displayWidth();
     $height = $display->get_displayHeight();
-    print("width=$width height=$height");
+
+    
+
+    /** @var $layer3 YDisplayLayer */
+    $layer3 = $display->get_displayLayer(3);
+    $layer3->drawImage(0,0,"drop.gif");
 
     /** @var $layer4 YDisplayLayer */
     $layer4 = $display->get_displayLayer(4);
@@ -167,7 +172,6 @@ if ($display->isOnline()) {
 
     $middle = (($hmax + $hmin) / 2);
     $middleScale = 5 * round($middle / 5);
-    print("max=$hmax min=$hmin middle= $middleScale");
     for ($i = $middleScale - 15; $i <= $middleScale + 15; $i += 5) {
         $layer4->drawText($width - 1, round(($height / 2) - 2 * ($i - $middle)), Y_ALIGN_CENTER_RIGHT, $i);
         $layer4->moveTo($width - 14, round(($height / 2) - 2 * ($i - $middle)));
